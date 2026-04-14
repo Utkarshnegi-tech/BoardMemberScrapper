@@ -1,6 +1,7 @@
 import pandas as pd
 import time
 import random
+import os
 from seleniumbase import Driver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
@@ -19,68 +20,83 @@ driver = Driver(uc=True, headed=True)
 driver.maximize_window()
 wait = WebDriverWait(driver, 25)
 
+all_data = []
+current_title = ""
+
 def wait_for_cloudflare():
     try:
         WebDriverWait(driver, 30).until(
             lambda d: "just a moment" not in d.page_source.lower()
-            and "performing security verification" not in d.page_source.lower()
         )
-        time.sleep(random.uniform(2, 4))
+        time.sleep(2)
     except:
-        try:
-            driver.uc_gui_click_captcha()
-            time.sleep(8)
-        except:
-            pass
+        pass
 
 def extract_editorial_board():
+    global all_data, current_title
     try:
         driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
         time.sleep(3)
 
-        section = wait.until(
-            EC.presence_of_element_located(
-                (By.XPATH, "//h2[contains(.,'Editorial board')]")
-            )
-        )
-
-        driver.execute_script("arguments[0].scrollIntoView({block:'start'});", section)
-        time.sleep(2)
+        wait.until(EC.presence_of_element_located(
+            (By.XPATH, "//h2[contains(.,'Editorial board')]")
+        ))
 
         elements = driver.find_elements(
             By.XPATH,
-            "//h2[contains(.,'Editorial board')]/following::*"
+            "//h2[contains(.,'Editorial board')]/following::*[self::p or self::li or self::div or self::span]"
         )
 
-        names = []
-        current_role = ""
+        lines = []
 
         for el in elements:
-            tag = el.tag_name.lower()
-            text = el.text.strip()
+            txt = el.text
+            if txt:
+                txt = txt.encode('utf-8', 'ignore').decode('utf-8')
+                txt = txt.replace("â€“", "–")
+                lines.extend(txt.split("\n"))
 
-            if not text:
+        lines = [l.strip() for l in lines if l.strip()]
+
+        current_role = ""
+
+        for line in lines:
+
+            if line.lower().startswith("editorial board"):
                 continue
 
-            if tag in ["h2"] and "editorial" not in text.lower():
-                break
-
-            if tag in ["h3", "strong", "b"]:
-                current_role = text
+            # ROLE
+            if "–" not in line:
+                current_role = line
                 continue
 
-            if "–" in text:
-                names.append(f"{text} | {current_role}")
+            # NAME + AFFILIATION
+            if "–" in line:
+                parts = line.split("–")
+                name_aff = parts[0].strip()
+                affiliation = parts[1].strip() if len(parts) > 1 else ""
 
-        print("\nEditorial Board:")
-        for n in names:
-            print("-", n)
+                # Handle multiple names in one line (comma separated)
+                if "," in name_aff and current_role.lower().startswith("founding"):
+                    split_names = [n.strip() for n in name_aff.split(",")]
 
-        return names
+                    for nm in split_names:
+                        all_data.append({
+                            "journal_title": current_title,
+                            "name_affiliation": nm,
+                            "role": current_role,
+                            "other_details": affiliation
+                        })
+                else:
+                    all_data.append({
+                        "journal_title": current_title,
+                        "name_affiliation": name_aff,
+                        "role": current_role,
+                        "other_details": affiliation
+                    })
 
     except Exception as e:
         print("Extraction error:", e)
-        return []
 
 def open_about_page():
     try:
@@ -98,15 +114,12 @@ def open_about_page():
                 return
             except:
                 continue
-
-        print("About page not found")
-
     except Exception as e:
         print("About page error:", e)
 
 def search_and_extract(query):
     driver.get("https://www.google.com")
-    time.sleep(random.uniform(2, 4))
+    time.sleep(2)
 
     try:
         btn = wait.until(
@@ -117,40 +130,43 @@ def search_and_extract(query):
         pass
 
     search_box = wait.until(EC.presence_of_element_located((By.NAME, "q")))
-    search_box.clear()
     search_box.send_keys(f'"{query}" site:{preferred_site}')
     search_box.send_keys(Keys.RETURN)
 
     wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "h3")))
-
     results = driver.find_elements(By.CSS_SELECTOR, "h3")
 
-    if not results:
-        print("No results")
-        return
-
-    try:
+    if results:
         results[0].click()
         time.sleep(5)
         wait_for_cloudflare()
         open_about_page()
-    except Exception as e:
-        print("Open result error:", e)
 
 for i in range(min(how_many, len(df))):
-    title = str(df.iloc[i].get(column_name, "")).strip()
+    current_title = str(df.iloc[i].get(column_name, "")).strip()
 
-    if not title or title.lower() == "nan":
+    if not current_title or current_title.lower() == "nan":
         continue
 
-    print("\n" + "=" * 80)
-    print(f"Processing: {title}")
+    print("\nProcessing:", current_title)
 
     try:
-        search_and_extract(title)
-        time.sleep(random.uniform(5, 8))
+        search_and_extract(current_title)
+        time.sleep(5)
     except Exception as e:
         print("Row error:", e)
 
-input("\nPress Enter to close...")
+# ✅ SAVE OUTPUT
+output_csv = "editorial_board_output.csv"
+output_excel = "editorial_board_output.xlsx"
+
+df_out = pd.DataFrame(all_data)
+
+df_out.to_csv(output_csv, index=False)
+df_out.to_excel(output_excel, index=False)
+
+print("\nSaved CSV:", os.path.abspath(output_csv))
+print("Saved Excel:", os.path.abspath(output_excel))
+
+input("Press Enter to close...")
 driver.quit()
