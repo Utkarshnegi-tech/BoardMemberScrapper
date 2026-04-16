@@ -1,6 +1,5 @@
 import pandas as pd
 import time
-import random
 import os
 from seleniumbase import Driver
 from selenium.webdriver.common.by import By
@@ -36,73 +35,79 @@ def wait_for_cloudflare():
 
 def extract_editorial_board():
     global all_data, current_title
+
     try:
+        # scroll to load content
         for _ in range(5):
-            driver.execute_script("window.scrollBy(0, 1000);")
+            driver.execute_script("window.scrollBy(0, 1200);")
             time.sleep(1)
 
+        # wait for editorial section (flexible)
         wait.until(
             EC.presence_of_element_located(
-                (By.XPATH, "//h2[contains(.,'Editorial')]")
+                (By.XPATH, "//*[contains(text(),'Editorial')]")
             )
         )
+        time.sleep(2)
 
-        elements = driver.find_elements(
-            By.XPATH,
-            "//h2[contains(.,'Editorial')]/following-sibling::*"
+        # find the section header
+        headers = driver.find_elements(
+            By.XPATH, "//*[self::h2 or self::h3][contains(.,'Editorial')]"
         )
 
-        print("Total elements found:", len(elements))
+        if not headers:
+            print("Editorial section not found")
+            return
 
-        current_role = ""
+        section = headers[0]
+
+        elements = section.find_elements(
+            By.XPATH, "following-sibling::*"
+        )
+
+        current_role = "Editorial Board"
 
         for el in elements:
             tag = el.tag_name.lower()
-            txt = el.text.strip()
 
-            if not txt:
-                continue
-
-            txt = txt.encode('utf-8', 'ignore').decode('utf-8')
-            txt = txt.replace("â€“", "–")
-
-            if tag == "h2":
+            # stop when next section starts
+            if tag in ["h2", "h3"]:
                 break
 
-            lines = [l.strip() for l in txt.split("\n") if l.strip()]
+            text = el.text.strip()
+            if not text:
+                continue
+
+            lines = [l.strip() for l in text.split("\n") if l.strip()]
 
             for line in lines:
-                if len(line) > 120:
+
+                # detect role headings
+                if len(line.split()) <= 6 and ("–" not in line and "-" not in line):
+                    current_role = line
                     continue
 
-                if line.count(",") > 3:
+                # split name and affiliation
+                if "–" in line:
+                    parts = line.split("–")
+                elif "-" in line:
+                    parts = line.split("-")
+                else:
                     continue
-
-                if "–" not in line:
-                    if len(line.split()) <= 6:
-                        current_role = line
-                    continue
-
-                parts = line.split("–")
 
                 name = parts[0].strip()
                 affiliation = parts[1].strip() if len(parts) > 1 else ""
 
-                if not (2 <= len(name.split()) <= 6):
-                    continue
-
-                if any(x in name.lower() for x in [
-                    "journal", "society", "publication", "study"
-                ]):
+                if len(name.split()) < 2:
                     continue
 
                 print(f"Captured: {name} | {affiliation} | {current_role}")
 
                 all_data.append({
                     "journal_title": current_title,
-                    "name_affiliation": name,
+                    "name": name,
                     "role": current_role,
-                    "other_details": affiliation
+                    "affiliation": affiliation
                 })
 
     except Exception as e:
@@ -114,18 +119,27 @@ def open_about_page():
         links = driver.find_elements(By.XPATH, "//a")
 
         for link in links:
-            try:
-                href = link.get_attribute("href") or ""
-                text = link.text.lower()
+            href = link.get_attribute("href") or ""
+            text = link.text.lower()
 
-                if "about" in text or "about-this-journal" in href:
-                    driver.execute_script("arguments[0].click();", link)
-                    time.sleep(5)
-                    wait_for_cloudflare()
-                    extract_editorial_board()
-                    return
-            except:
-                continue
+            if "about-this-journal" in href:
+                driver.execute_script(
+                    "window.location.href = arguments[0];", href
+                )
+                time.sleep(5)
+                wait_for_cloudflare()
+                extract_editorial_board()
+                return
+
+        # fallback
+        for link in links:
+            text = link.text.lower()
+            if "about" in text:
+                driver.execute_script("arguments[0].click();", link)
+                time.sleep(5)
+                wait_for_cloudflare()
+                extract_editorial_board()
+                return
 
         print("About page not found")
 
@@ -156,6 +170,7 @@ def search_and_extract(query):
     wait.until(
         EC.presence_of_element_located((By.CSS_SELECTOR, "h3"))
     )
+
     results = driver.find_elements(By.CSS_SELECTOR, "h3")
 
     if results:
@@ -168,7 +183,11 @@ def search_and_extract(query):
 
         time.sleep(5)
         wait_for_cloudflare()
+
         open_about_page()
+
+        # ensure extraction completes before closing
+        time.sleep(3)
 
         driver.close()
         driver.switch_to.window(driver.window_handles[0])
