@@ -105,17 +105,17 @@ def extract_editorial_board():
         )
         time.sleep(2)
 
-        # ── Strategy 1: structured dl/dt/dd lists (common on T&F) ──────────────
+        #  1: structured dl/dt/dd lists (common on T&F) 
         extracted = _extract_dl_structure()
         if extracted:
             return
 
-        # ── Strategy 2: heading + sibling paragraphs ───────────────────────────
+        #2: heading + sibling paragraphs 
         extracted = _extract_heading_siblings()
         if extracted:
             return
 
-        # ── Strategy 3: generic text scan ─────────────────────────────────────
+        # 3: generic text scan 
         _extract_generic_text()
 
     except Exception as e:
@@ -321,7 +321,6 @@ def _parse_member_line(line, section, role):
 
     record(section, role, name, affiliation)
 
-
 # ── Navigation helpers ──────────────────────────────────────────────────────
 
 def open_about_page():
@@ -411,7 +410,6 @@ def search_and_extract(query):
     time.sleep(3)
     driver.close()
     driver.switch_to.window(driver.window_handles[0])
-
 
 # ── Main loop ───────────────────────────────────────────────────────────────
 
@@ -657,7 +655,7 @@ df_orcid_out = pd.DataFrame(all_orcid_results, columns=[
 df_orcid_out = df_orcid_out.fillna("null")
 df_orcid_out.to_csv(orcid_results_csv, index=False, encoding="utf-8-sig")
 
-print("\n==============================")
+print("\n==================")
 print("ORCID lookup complete.")
 print(f"ORCID results CSV : {orcid_results_path}")
 print(f"Total records     : {len(all_orcid_results)}")
