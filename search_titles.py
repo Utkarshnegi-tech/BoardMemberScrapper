@@ -36,15 +36,24 @@ import sys
 _BASE_DIR  = os.path.dirname(os.path.abspath(sys.argv[0]))
 file_path  = os.path.join(_BASE_DIR, "malmad-title-list-9-january-2023.xlsx")
 column_name    = "title"
-how_many       = 1
+how_many       = 3
 preferred_site = "tandfonline.com"
 
 df = pd.read_excel(file_path)
 df.columns = df.columns.str.strip().str.lower()
 
 driver = Driver(uc=True, headed=True)
-driver.set_page_load_timeout(20)
-wait = WebDriverWait(driver, 10)
+driver.set_page_load_timeout(30)
+wait = WebDriverWait(driver, 7)
+
+# ── Debug helper ──────────────────────────────────────────────────────────────
+import datetime
+
+def dbg(msg, level="INFO"):
+    ts = datetime.datetime.now().strftime("%H:%M:%S")
+    prefix = {"INFO": "ℹ", "OK": "✔", "WARN": "⚠", "ERR": "✖", "CAPTCHA": "🔒", "NAV": "→"}.get(level, "·")
+    print(f"[{ts}] {prefix}  {msg}")
+# ─────────────────────────────────────────────────────────────────────────────
 
 all_data         = []
 current_title    = ""
@@ -320,7 +329,7 @@ def _split_into_entries(text):
 
 def extract_editorial_board():
     driver.execute_script("window.scrollTo(0, document.body.scrollHeight)")
-    time.sleep(2)
+    time.sleep(0.5)
 
     count_before = len(all_data)
 
@@ -428,14 +437,61 @@ def _extract_generic_text():
         print("Generic text strategy error:", e)
 
 
+
 def _wait_if_captcha(drv):
-    """If a CAPTCHA/bot-check is detected, pause until the user solves it."""
+
     captcha_signals = [
         "i am not a robot", "are you a robot",
-        "verify you are human", "just a moment",
-        "checking your browser", "enable javascript and cookies",
+        "verify you are human", "checking your browser",
+        "enable javascript and cookies",
+        "just a moment"
     ]
-    # Also detect Google's /sorry page (reCAPTCHA checkbox)
+
+    try:
+        body_text = drv.find_element(By.TAG_NAME, "body").text.lower()
+    except Exception:
+        body_text = ""
+
+    current_url = drv.current_url.lower()
+
+    is_captcha = (
+        any(sig in body_text for sig in captcha_signals)
+        or "google.com/sorry" in current_url
+        or "recaptcha" in current_url
+    )
+
+    if not is_captcha:
+        return False
+
+    dbg("CAPTCHA detected — blocking execution for 60 seconds.", "CAPTCHA")
+
+    # 🔴 HARD BLOCK — no threads
+    start = time.time()
+    while True:
+        try:
+            body_text = drv.find_element(By.TAG_NAME, "body").text.lower()
+        except Exception:
+            body_text = ""
+
+        solved = not any(sig in body_text for sig in captcha_signals)
+
+        if solved:
+            dbg("CAPTCHA solved — resuming.", "OK")
+            return True
+
+        if time.time() - start > 60:
+            dbg("CAPTCHA not solved in 60s — continuing anyway.", "WARN")
+            return True
+
+        time.sleep(2)
+
+    """If a CAPTCHA/bot-check is detected, stop and wait up to 60s for the user to solve it."""
+    captcha_signals = [
+        "i am not a robot", "are you a robot",
+        "verify you are human", "checking your browser",
+        "enable javascript and cookies",
+    ]
+
     try:
         current_url = drv.current_url.lower()
     except Exception:
@@ -449,42 +505,52 @@ def _wait_if_captcha(drv):
         body_text = ""
 
     text_is_captcha = any(sig in body_text for sig in captcha_signals)
+    if not text_is_captcha and url_is_captcha:
+        text_is_captcha = "just a moment" in body_text
 
     if not url_is_captcha and not text_is_captcha:
-        return
+        return False   # no captcha — continue normally
 
-    print("\n⚠️  CAPTCHA / bot-check detected! Please solve it in the browser window.")
-    attempts = 0
-    while attempts < 20:
-        input("    Press Enter once you've solved it to resume...")
-        try:
-            new_url  = drv.current_url.lower()
-            body_now = drv.find_element(By.TAG_NAME, "body").text.lower()
-        except Exception:
-            break
-        still_captcha = (
-            "google.com/sorry" in new_url
-            or "recaptcha" in new_url
-            or any(sig in body_now for sig in captcha_signals)
-        )
-        if not still_captcha:
-            print("   ✅ CAPTCHA cleared, resuming...")
-            break
-        attempts += 1
-        print("   ⚠️  Still detecting a bot check — please finish solving it.")
+    # ── CAPTCHA detected ──────────────────────────────────────────────────────
+    dbg("CAPTCHA detected! You have 60 seconds to solve it in the browser.", "CAPTCHA")
+
+    # Freeze the page — set timeout to 0 so browser won't reload
+    try:
+        drv.set_page_load_timeout(999)
+    except Exception:
+        pass
+
+    # Wait up to 60 seconds for user to press Enter
+    import threading
+    solved = [False]
+
+    def _wait_input():
+        input("    [CAPTCHA] Press Enter once you've solved it (or wait 60s to skip)...")
+        solved[0] = True
+
+    t = threading.Thread(target=_wait_input, daemon=True)
+    t.start()
+    t.join(timeout=60)
+
+    if solved[0]:
+        dbg("CAPTCHA solved by user — resuming.", "OK")
+    else:
+        dbg("60 seconds elapsed — skipping this item.", "WARN")
+
+    # Restore normal page load timeout
+    try:
+        drv.set_page_load_timeout(30)
+    except Exception:
+        pass
+
+    return True
 
 
 def _safe_get(drv, url, timeout=20):
     """Navigate to url, return True on success, False on timeout/error."""
-    old_timeout = None
-    try:
-        old_timeout = drv.timeouts.page_load
-    except Exception:
-        pass
     try:
         drv.set_page_load_timeout(timeout)
         drv.get(url)
-        _wait_if_captcha(drv)
         return True
     except Exception as e:
         print(f"  Page load failed ({url}): {type(e).__name__}")
@@ -492,15 +558,7 @@ def _safe_get(drv, url, timeout=20):
             drv.execute_script("window.stop();")
         except Exception:
             pass
-        # still check for captcha on partial load
-        _wait_if_captcha(drv)
         return False
-    finally:
-        try:
-            if old_timeout is not None:
-                drv.set_page_load_timeout(old_timeout)
-        except Exception:
-            pass
 
 
 def _cleanup_extra_tabs(drv, keep_handle=None):
@@ -539,7 +597,7 @@ def open_about_page():
             eb_url = f"https://www.tandfonline.com/action/journalInformation?show=editorialBoard&journalCode={journal_code}"
             print(f"  Navigating to editorial board: {eb_url}")
             if _safe_get(driver, eb_url):
-                time.sleep(3)
+                time.sleep(1)
                 wait_for_cloudflare()
                 if extract_editorial_board():
                     return
@@ -547,7 +605,7 @@ def open_about_page():
             about_url = f"https://www.tandfonline.com/journals/{journal_code}/about-this-journal#editorial-board"
             print(f"  Trying about page: {about_url}")
             if _safe_get(driver, about_url):
-                time.sleep(3)
+                time.sleep(1)
                 wait_for_cloudflare()
                 if extract_editorial_board():
                     return
@@ -591,7 +649,7 @@ def open_about_page():
             except Exception:
                 pass
 
-        time.sleep(3)
+        time.sleep(1)
         wait_for_cloudflare()
         extract_editorial_board()
 
@@ -615,7 +673,7 @@ def search_and_extract(query):
             btn.click()
         except Exception:
             driver.execute_script("arguments[0].click();", btn)
-        time.sleep(1)
+        time.sleep(0.3)
     except Exception:
         pass
 
@@ -642,12 +700,31 @@ def search_and_extract(query):
             print(f"  Could not interact with search box: {e}, skipping.")
             return
 
+    # Freeze page load timeout immediately after submitting search —
+    # prevents Selenium from reloading the page if Google shows a CAPTCHA.
+    time.sleep(0.5)   # let renderer start before changing timeout
+    try:
+        driver.set_page_load_timeout(999)
+    except Exception:
+        pass
+
+    time.sleep(2)
+
+    # Check for CAPTCHA — if present, user has 60s to solve it
+    _wait_if_captcha(driver)
+
+    # Restore timeout for subsequent navigations
+    try:
+        driver.set_page_load_timeout(30)
+    except Exception:
+        pass
+
     try:
         wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "h3")))
     except Exception:
         print("  No search results loaded, skipping.")
         return
-    time.sleep(2)
+    time.sleep(0.5)
 
     results = driver.find_elements(By.CSS_SELECTOR, "h3")
     if not results:
@@ -659,23 +736,20 @@ def search_and_extract(query):
         print("  Could not get result URL")
         return
 
-    main_handle = driver.window_handles[0]
-    try:
-        driver.execute_script("window.open(arguments[0]);", link)
-        driver.switch_to.window(driver.window_handles[-1])
-    except Exception as e:
-        print(f"  Could not open result tab: {e}")
-        _cleanup_extra_tabs(driver, main_handle)
+    # Navigate in the same tab — window.open() causes the global `driver`
+    # to stay on the Google tab while the new tab is never referenced.
+    print(f"  Navigating to: {link}")
+    if not _safe_get(driver, link):
+        print("  Could not load result page, skipping.")
         return
 
-    # wait for page to settle (don't hard-fail on timeout)
+    # Wait for page to settle
     try:
-        WebDriverWait(driver, 15).until(lambda d: d.execute_script("return document.readyState") == "complete")
+        WebDriverWait(driver, 10).until(
+            lambda d: d.execute_script("return document.readyState") == "complete"
+        )
     except Exception:
-        try:
-            driver.execute_script("window.stop();")
-        except Exception:
-            pass
+        pass
 
     print("  Opened:", driver.current_url)
 
@@ -687,7 +761,7 @@ def search_and_extract(query):
         _seg  = _path.split("/")[-1]
         current_acronym = re.sub(r"\d.*", "", _seg).upper() or ""
 
-    time.sleep(3)
+    time.sleep(1)
     wait_for_cloudflare()
 
     try:
@@ -695,26 +769,55 @@ def search_and_extract(query):
     except Exception as e:
         print(f"  open_about_page error: {e}")
 
-    time.sleep(2)
-    _cleanup_extra_tabs(driver, main_handle)
-
 
 #Main processing loop
 
+def _restart_driver():
+    """Quit and restart the main driver after a session crash."""
+    global driver, wait
+    dbg("Restarting main driver after session crash...", "WARN")
+    try:
+        driver.quit()
+    except Exception:
+        pass
+    try:
+        driver = Driver(uc=True, headed=True)
+        driver.set_page_load_timeout(30)
+        wait = WebDriverWait(driver, 7)
+        dbg("Main driver restarted successfully.", "OK")
+    except Exception as e:
+        dbg(f"Failed to restart main driver: {e}", "ERR")
+
 for i in range(min(how_many, len(df))):
     current_title   = str(df.iloc[i].get(column_name, "")).strip()
-    current_acronym = ""   # will be set once we land on the TandF page
+    current_acronym = ""
 
     if not current_title or current_title.lower() == "nan":
         continue
 
-    print(f"\n[{i+1}] Processing: {current_title}")
+    dbg(f"[{i+1}/{min(how_many, len(df))}] Processing: {current_title}", "INFO")
 
-    try:
-        search_and_extract(current_title)
-        time.sleep(3)
-    except Exception as e:
-        print("Row error:", e)
+    max_retries = 5
+    for attempt in range(max_retries):
+        try:
+            search_and_extract(current_title)
+            # If a CAPTCHA appeared, solve it then retry the same title
+            if _wait_if_captcha(driver):
+                dbg(f"CAPTCHA solved — retrying: {current_title}", "WARN")
+                continue
+            time.sleep(1.5)
+            dbg(f"[{i+1}] Finished: {current_title}", "OK")
+            break
+        except Exception as e:
+            msg = str(e)
+            if "invalid session id" in msg or "session deleted" in msg:
+                dbg(f"Session crash (attempt {attempt+1}) — restarting driver...", "ERR")
+                _restart_driver()
+                if attempt == max_retries - 1:
+                    dbg(f"Giving up after {max_retries} attempts: {current_title}", "ERR")
+            else:
+                dbg(f"Row error: {e}", "ERR")
+                break
 
 output_csv  = os.path.join(_BASE_DIR, "editorial_board_output.csv")
 output_path = os.path.abspath(output_csv)
@@ -964,7 +1067,7 @@ def _restart_driver2():
         pass
     try:
         driver2 = Driver(uc=True, headed=True)
-        driver2.set_page_load_timeout(30)
+        driver2.set_page_load_timeout(20)
         print("  driver2 restarted successfully.")
     except Exception as e:
         print(f"  Failed to restart driver2: {e}")
@@ -1144,10 +1247,22 @@ def google_search_person(row_data, first_name, last_name, affiliation):
         print("  driver2 has no open windows — skipping.")
         return None
 
-    if not _safe_get(driver2, "https://www.google.com", timeout=20):
+    if not _safe_get(driver2, "https://www.google.com", timeout=30):
         print("  Could not load Google for person search, skipping.")
         return None
+
+    # Freeze timeout right after landing on Google so a CAPTCHA page
+    # cannot be auto-reloaded while the user is solving it.
+    try:
+        driver2.set_page_load_timeout(999)
+    except Exception:
+        pass
+    time.sleep(1)
     _wait_if_captcha(driver2)
+    try:
+        driver2.set_page_load_timeout(20)
+    except Exception:
+        pass
 
     try:
         btn = WebDriverWait(driver2, 8).until(
@@ -1187,13 +1302,27 @@ def google_search_person(row_data, first_name, last_name, affiliation):
             print(f"    Could not interact with search box: {e}, skipping.")
             return None
 
+    # Freeze timeout immediately so a CAPTCHA page cannot be reloaded
+    time.sleep(0.5)   # let renderer start before changing timeout
     try:
-        WebDriverWait(driver2, 10).until(
+        driver2.set_page_load_timeout(999)
+    except Exception:
+        pass
+
+    time.sleep(2)
+    _wait_if_captcha(driver2)
+
+    # Restore timeout for subsequent navigations
+    try:
+        driver2.set_page_load_timeout(60)
+    except Exception:
+        pass
+
+    try:
+        WebDriverWait(driver2, 60).until(
             EC.presence_of_element_located((By.CSS_SELECTOR, "h3"))
         )
-        time.sleep(1)
-
-        _wait_if_captcha(driver2)
+        time.sleep(0.5)
     except Exception:
         print("    Search results did not load, skipping.")
         return None
@@ -1232,7 +1361,7 @@ def google_search_person(row_data, first_name, last_name, affiliation):
         print(f"    Loaded: {link}")
 
     _cleanup_extra_tabs(driver2)
-    time.sleep(2)
+    time.sleep(0.5)
     _wait_if_captcha(driver2)
 
     # verify the final URL after redirects is still academic
@@ -1267,7 +1396,7 @@ def google_search_person(row_data, first_name, last_name, affiliation):
 print("\nStarting Google person search + scraping for all scraped members...")
 
 driver2 = Driver(uc=True, headed=True)
-driver2.set_page_load_timeout(30) 
+driver2.set_page_load_timeout(20)
 
 df_members      = pd.read_csv(output_csv)
 all_person_data = []
@@ -1292,7 +1421,7 @@ for idx, row in df_members.iterrows():
     try:
         details = google_search_person(row.to_dict(), fn, ln, aff)
         all_person_data.append(details if details else baseline)
-        time.sleep(2)
+        time.sleep(0.5)
     except Exception as e:
         all_person_data.append(baseline)
         msg = str(e)
